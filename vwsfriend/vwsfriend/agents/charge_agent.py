@@ -27,6 +27,8 @@ class ChargeAgent():
                                                    ).order_by(Charge.carCapturedTimestamp.desc()).first()
         self.chargingSession = None
         self.previousChargingSession = None
+        self._accumulated_energy_kWh = 0.0
+        self._last_power_timestamp = None
 
         # register for updates:
         if self.vehicle.weConnectVehicle is not None:
@@ -128,6 +130,15 @@ class ChargeAgent():
                         LOG.warning('Could not add charge entry to the database, this is usually due to an error in the WeConnect API (%s)', err)
                 self.session.commit()
 
+            if self.chargingSession is not None and self.chargingSession.isChargingState() \
+                    and chargeStatus.chargePower_kW.enabled and chargeStatus.chargePower_kW.value is not None:
+                current_ts = chargeStatus.carCapturedTimestamp.value
+                if self._last_power_timestamp is not None and current_ts is not None:
+                    delta_hours = (current_ts - self._last_power_timestamp).total_seconds() / 3600.0
+                    if delta_hours > 0:
+                        self._accumulated_energy_kWh += current_chargePower_kW * delta_hours
+                self._last_power_timestamp = current_ts
+
     def __onChargingStateChange(self, element, flags):  # noqa: C901
         chargeStatus = self.vehicle.weConnectVehicle.domains['charging']['chargingStatus']
 
@@ -165,9 +176,12 @@ class ChargeAgent():
                                  or self.chargingSession.ended > (chargeStatus.carCapturedTimestamp.value - timedelta(hours=interruptTimeHours))):
                         self.chargingSession.ended = None
                         self.chargingSession.endSOC_pct = None
+                        self._last_power_timestamp = chargeStatus.carCapturedTimestamp.value
                     else:
                         self.previousChargingSession = self.chargingSession
                         self.chargingSession = ChargingSession(vehicle=self.vehicle)
+                        self._accumulated_energy_kWh = 0.0
+                        self._last_power_timestamp = None
                         try:
                             self.session.add(self.chargingSession)
                         except IntegrityError:
@@ -225,6 +239,12 @@ class ChargeAgent():
 
                     # also write milage if available
                     self.updateMileage()
+
+                    if self.chargingSession.realCharged_kWh is None:
+                        self.chargingSession.realCharged_kWh = self._accumulated_energy_kWh
+
+                self._accumulated_energy_kWh = 0.0
+                self._last_power_timestamp = None
             self.session.commit()
 
     def __onPlugConnectionStateChange(self, element, flags):  # noqa: C901
@@ -256,6 +276,8 @@ class ChargeAgent():
                 if self.chargingSession is None or self.chargingSession.isClosed():
                     self.previousChargingSession = self.chargingSession
                     self.chargingSession = ChargingSession(vehicle=self.vehicle)
+                    self._accumulated_energy_kWh = 0.0
+                    self._last_power_timestamp = None
                     try:
                         self.session.add(self.chargingSession)
                     except IntegrityError as err:
@@ -276,10 +298,14 @@ class ChargeAgent():
                     self.chargingSession.disconnected = plugStatus.carCapturedTimestamp.value
 
                 if self.chargingSession is not None:
+                    if self.chargingSession.realCharged_kWh is None:
+                        self.chargingSession.realCharged_kWh = self._accumulated_energy_kWh
                     # also write position if available
                     self.updatePosition()
                     # also write milage if available
                     self.updateMileage()
+            self._accumulated_energy_kWh = 0.0
+            self._last_power_timestamp = None
             self.session.commit()
 
     def __onPlugLockStateChange(self, element, flags):  # noqa: C901
@@ -317,6 +343,8 @@ class ChargeAgent():
                     else:
                         self.previousChargingSession = self.chargingSession
                         self.chargingSession = ChargingSession(vehicle=self.vehicle)
+                        self._accumulated_energy_kWh = 0.0
+                        self._last_power_timestamp = None
                         try:
                             self.session.add(self.chargingSession)
                         except IntegrityError as err:
